@@ -28,25 +28,40 @@ class S3Operations(object):
             'S3 File Attachment',
             'S3 File Attachment',
         )
+        client_kwargs = {
+            'region_name': self.s3_settings_doc.region_name or None,
+            'config': Config(signature_version='s3v4'),
+        }
+        endpoint_url = (self.s3_settings_doc.get('endpoint_url') or '').strip().rstrip('/')
+        if endpoint_url:
+            # S3-compatible storage (Cloudflare R2, MinIO, Wasabi, ...)
+            client_kwargs['endpoint_url'] = endpoint_url
+            if not client_kwargs['region_name']:
+                client_kwargs['region_name'] = 'auto'
         if (
             self.s3_settings_doc.aws_key and
             self.s3_settings_doc.aws_secret
         ):
-            self.S3_CLIENT = boto3.client(
-                's3',
-                aws_access_key_id=self.s3_settings_doc.aws_key,
-                aws_secret_access_key=self.s3_settings_doc.aws_secret,
-                region_name=self.s3_settings_doc.region_name,
-                config=Config(signature_version='s3v4')
-            )
-        else:
-            self.S3_CLIENT = boto3.client(
-                's3',
-                region_name=self.s3_settings_doc.region_name,
-                config=Config(signature_version='s3v4')
-            )
+            client_kwargs['aws_access_key_id'] = self.s3_settings_doc.aws_key
+            client_kwargs['aws_secret_access_key'] = self.s3_settings_doc.aws_secret
+        self.S3_CLIENT = boto3.client('s3', **client_kwargs)
         self.BUCKET = self.s3_settings_doc.bucket_name
         self.folder_name = self.s3_settings_doc.folder_name
+        self.public_url = (self.s3_settings_doc.get('public_url') or '').strip().rstrip('/')
+
+    def get_public_url(self, key):
+        """
+        Public URL for a public file. Uses the configured Public Base URL
+        (e.g. Cloudflare R2 public bucket / custom domain) when set,
+        otherwise <endpoint>/<bucket>/<key>.
+        """
+        if self.public_url:
+            return '{}/{}'.format(self.public_url, key)
+        return '{}/{}/{}'.format(
+            self.S3_CLIENT.meta.endpoint_url,
+            self.BUCKET,
+            key
+        )
 
     def strip_special_chars(self, file_name):
         """
@@ -190,6 +205,10 @@ def file_upload_to_s3(doc, method):
     check and upload files to s3. the path check and
     """
     s3_upload = S3Operations()
+    if not s3_upload.BUCKET:
+        # Not configured yet: keep the file on the local filesystem instead
+        # of failing every upload on the site.
+        return
     path = doc.file_url
     site_path = frappe.utils.get_site_path()
     parent_doctype = doc.attached_to_doctype or 'File'
@@ -210,11 +229,7 @@ def file_upload_to_s3(doc, method):
             method = "frappe_s3_attachment.controller.generate_file"
             file_url = """/api/method/{0}?key={1}&file_name={2}""".format(method, key, doc.file_name)
         else:
-            file_url = '{}/{}/{}'.format(
-                s3_upload.S3_CLIENT.meta.endpoint_url,
-                s3_upload.BUCKET,
-                key
-            )
+            file_url = s3_upload.get_public_url(key)
         os.remove(file_path)
         frappe.db.sql("""UPDATE `tabFile` SET file_url=%s, folder=%s,
             old_parent=%s, content_hash=%s WHERE name=%s""", (
@@ -274,11 +289,7 @@ def upload_existing_files_s3(name):
             method = "frappe_s3_attachment.controller.generate_file"
             file_url = """/api/method/{0}?key={1}""".format(method, key)
         else:
-            file_url = '{}/{}/{}'.format(
-                s3_upload.S3_CLIENT.meta.endpoint_url,
-                s3_upload.BUCKET,
-                key
-            )
+            file_url = s3_upload.get_public_url(key)
 
         # Remove file from local.
         os.remove(file_path)
