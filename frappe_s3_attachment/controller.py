@@ -133,7 +133,9 @@ class S3Operations(object):
                         "ContentType": content_type,
                         "Metadata": {
                             "ContentType": content_type,
-                            "file_name": file_name
+                            # S3/R2 metadata must be ASCII. macOS screenshot names
+                            # contain a narrow no-break space (U+202F) before AM/PM.
+                            "file_name": file_name.encode("ascii", "ignore").decode("ascii")
                         }
                     }
                 )
@@ -208,6 +210,11 @@ def file_upload_to_s3(doc, method):
     if not s3_upload.BUCKET:
         # Not configured yet: keep the file on the local filesystem instead
         # of failing every upload on the site.
+        return
+    if not doc.attached_to_doctype or doc.attached_to_doctype == "Attachment Queue":
+        # Keep "upload first" files local: Frappe's Attachment Queue only accepts
+        # file URLs ending in .pdf/.jpg/.jpeg/.png and reads the file from disk
+        # to preview it, so an S3 generate_file URL is rejected.
         return
     path = doc.file_url
     site_path = frappe.utils.get_site_path()
